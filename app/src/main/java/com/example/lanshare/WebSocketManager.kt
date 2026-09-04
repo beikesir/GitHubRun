@@ -40,6 +40,8 @@ class WebSocketManager {
     companion object {
         private const val TAG = "WsManager"
         private const val MAX_RETRY = 8
+        /** 去重缓存上限：超出后按先进先出淘汰，防止长时间运行内存无限增长 */
+        private const val SEEN_CAP = 512
     }
 
     private val client = OkHttpClient.Builder()
@@ -85,7 +87,7 @@ class WebSocketManager {
         synchronized(seenIds) {
             if (!seenIds.add(id)) return true
             seenOrder.addLast(id)
-            if (seenOrder.size > seenCap) {
+            if (seenOrder.size > SEEN_CAP) {
                 val old = seenOrder.removeFirst()
                 seenIds.remove(old)
             }
