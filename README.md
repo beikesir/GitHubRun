@@ -105,8 +105,8 @@ relay/
 ```
 
 ## 已知不足
-- 消息历史仅存本地（扩展存 chrome.storage，App 存内存），中继重启后不回溯
-- 无鉴权，频道号可被枚举；建议仅家庭/可信网络使用
+- 中继历史仅保留最近 300 条/频道，重启后新客户端最多补发 50 条（含最多 5 张图）
+- 未设口令的频道为明文传输；设了口令的频道为端到端加密，中继只搬运密文
 - 扩展依赖 Service Worker 保活，浏览器完全关闭后需重开
 
 
@@ -136,8 +136,20 @@ relay/
 - **频道发现**：点「发现」从中继拉取频道列表，🔒 频道弹窗输入口令
 - 图片保存逻辑统一到 `GallerySaver`，Android 9 以下会广播触发媒体库扫描
 
-## 已知不足（第三批待办）
-- 扩展 Service Worker 仍依赖浏览器存活，浏览器完全关闭后收不到消息
-- 无端到端加密，`ws://` 明文在不可信网络有嗅探风险
+## 已知不足（v4.0 之后的现状）
+- 扩展 Service Worker 仍依赖浏览器存活：浏览器完全关闭后收不到消息（面板打开时正常）
 - 历史无清理策略，长期运行 `history.json` 需手动维护
-- 多设备同频道无身份区分，无法分辨消息来自哪台设备
+- 未读角标在部分第三方 Android 桌面（launcher）上不显示，应用内未读条始终可用
+- ACK 仅表示"对端客户端已接收"，不保证用户已阅读
+
+## 构建 APK（GitHub Actions）
+
+上传本目录到 GitHub 仓库，Actions 会自动跑 `Build Debug APK`。
+
+> **2026-09 起注意**：Node 20 运行时已从 GitHub runner 移除，旧版本 Action
+> （`checkout@v4` / `setup-java@v4` / `setup-android@v3` / `upload-artifact@v4`）
+> 会被强制在 Node 24 上运行并报错。当前工作流已统一升级到 Node 24 版本：
+> `checkout@v7`、`setup-java@v5`、`setup-android@v4`、`upload-artifact@v7`。
+
+若构建失败，把 Actions 里**红色步骤的完整日志**发出来定位，
+而不是只看摘要里的 warning（deprecation 警告不会导致构建失败）。
