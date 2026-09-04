@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="3dp"
+    android:paddingBottom="3dp">
+
+    <LinearLayout
+        android:id="@+id/bubble"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="start"
+        android:orientation="vertical"
+        android:maxWidth="272dp"
+        android:background="@drawable/bg_bubble_other">
+
+        <!-- 发送者设备名 + 加密标记，仅他人的消息显示 -->
+        <TextView
+            android:id="@+id/tvSender"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp"
+            android:textColor="@color/primary"
+            android:textStyle="bold"
+            android:textSize="11sp"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:visibility="gone" />
+
+        <!-- 图片消息：圆角裁切 -->
+        <ImageView
+            android:id="@+id/ivImage"
+            android:layout_width="230dp"
+            android:layout_height="wrap_content"
+            android:adjustViewBounds="true"
+            android:scaleType="fitCenter"
+            android:background="@drawable/bg_image"
+            android:clipToOutline="true"
+            android:visibility="gone"
+            android:contentDescription="图片消息" />
+
+        <!-- 文本消息 -->
+        <TextView
+            android:id="@+id/tvText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/bubble_other_text"
+            android:textSize="15sp"
+            android:lineSpacingExtra="2dp"
+            android:visibility="gone" />
+
+        <!-- 时间 -->
+        <TextView
+            android:id="@+id/tvTime"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginTop="4dp"
+            android:textColor="@color/text_dim"
+            android:alpha="0.7"
+            android:textSize="10sp" />
+
+    </LinearLayout>
+
+</FrameLayout>
