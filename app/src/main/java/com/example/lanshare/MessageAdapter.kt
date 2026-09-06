@@ -25,7 +25,9 @@ class MessageAdapter(
     private val messages: MutableList<Message>,
     private val onImageClick: (Message) -> Unit,
     private val onImageLongClick: (Message) -> Unit,
-    private val onTextLongClick: (Message) -> Unit
+    private val onTextLongClick: (Message) -> Unit,
+    /** 点击文件卡片：保存/打开文件 */
+    private val onFileClick: (Message) -> Unit = {}
 ) : RecyclerView.Adapter<MessageAdapter.VH>() {
 
     class VH(view: View) : RecyclerView.ViewHolder(view) {
@@ -34,6 +36,11 @@ class MessageAdapter(
         val tvText: TextView = view.findViewById(R.id.tvText)
         val tvTime: TextView = view.findViewById(R.id.tvTime)
         val tvSender: TextView = view.findViewById(R.id.tvSender)
+        // 文件消息
+        val fileCard: LinearLayout = view.findViewById(R.id.fileCard)
+        val tvFileIcon: TextView = view.findViewById(R.id.tvFileIcon)
+        val tvFileName: TextView = view.findViewById(R.id.tvFileName)
+        val tvFileSize: TextView = view.findViewById(R.id.tvFileSize)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -64,6 +71,10 @@ class MessageAdapter(
         holder.tvText.setTextColor(textColor)
         holder.tvTime.setTextColor(textColor)
         holder.tvTime.alpha = 0.55f
+        // 文件卡片：自己发的气泡是亮底，文字同步切换为深色以保证可读
+        holder.tvFileName.setTextColor(textColor)
+        holder.tvFileSize.setTextColor(textColor)
+        holder.tvFileSize.alpha = 0.7f
         holder.tvSender.setTextColor(
             ContextCompat.getColor(holder.itemView.context,
                 if (msg.isMe) R.color.bubble_me_text else R.color.primary)
@@ -73,27 +84,58 @@ class MessageAdapter(
         if (msg.locked) {
             holder.tvText.visibility = View.VISIBLE
             holder.ivImage.visibility = View.GONE
+            holder.fileCard.visibility = View.GONE
             holder.tvText.text = "🔒 加密消息：本机口令不匹配，无法解密"
             holder.tvText.setOnLongClickListener(null)
             holder.ivImage.setOnClickListener(null)
             holder.ivImage.setOnLongClickListener(null)
+            holder.fileCard.setOnClickListener(null)
         } else if (msg.isImage) {
             holder.ivImage.visibility = View.VISIBLE
             holder.tvText.visibility = View.GONE
+            holder.fileCard.visibility = View.GONE
             val bmp = msg.bitmap ?: decodeBase64(msg.content).also { msg.bitmap = it }
             if (bmp != null) holder.ivImage.setImageBitmap(bmp)
 
             holder.ivImage.setOnClickListener { onImageClick(msg) }
             holder.ivImage.setOnLongClickListener { onImageLongClick(msg); true }
             holder.tvText.setOnLongClickListener(null)
+            holder.fileCard.setOnClickListener(null)
+        } else if (msg.isFile) {
+            // 文件消息：图标 + 文件名 + 大小
+            holder.fileCard.visibility = View.VISIBLE
+            holder.ivImage.visibility = View.GONE
+            holder.tvText.visibility = View.GONE
+
+            holder.tvFileIcon.text = msg.icon()
+            holder.tvFileName.text = msg.fileName.ifBlank { "文件" }
+            holder.tvFileSize.text =
+                if (msg.omitted || msg.content.isBlank()) "文件（内容已不可回补）"
+                else msg.sizeText()
+
+            // 正文缺失的历史条目不可点击保存
+            if (msg.content.isBlank()) {
+                holder.fileCard.alpha = 0.55f
+                holder.fileCard.setOnClickListener(null)
+                holder.fileCard.setOnLongClickListener(null)
+            } else {
+                holder.fileCard.alpha = 1f
+                holder.fileCard.setOnClickListener { onFileClick(msg) }
+                holder.fileCard.setOnLongClickListener { onFileClick(msg); true }
+            }
+            holder.ivImage.setOnClickListener(null)
+            holder.ivImage.setOnLongClickListener(null)
+            holder.tvText.setOnLongClickListener(null)
         } else {
             holder.tvText.visibility = View.VISIBLE
             holder.ivImage.visibility = View.GONE
+            holder.fileCard.visibility = View.GONE
             holder.tvText.text = msg.content
 
             holder.tvText.setOnLongClickListener { onTextLongClick(msg); true }
             holder.ivImage.setOnClickListener(null)
             holder.ivImage.setOnLongClickListener(null)
+            holder.fileCard.setOnClickListener(null)
         }
 
         // 发送者与加密标记（自己发的消息不显示，避免冗余）

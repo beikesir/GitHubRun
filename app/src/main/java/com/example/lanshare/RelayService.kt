@@ -38,6 +38,14 @@ class RelayService : Service() {
                 val saved = saveImageToGallery(msg.content)
                 notifyMsg("[图片]", saved?.let { "已保存到相册：$it" } ?: "收到一张图片")
             }
+            "file" -> {
+                // 文件落到公共下载目录，保留原始文件名
+                val saved = if (msg.content.isBlank()) null
+                            else FileSaver.saveDataUrl(this, msg.content, msg.fileName, msg.mime)
+                val name = msg.fileName.ifBlank { "文件" }
+                notifyMsg("📎 $name",
+                    saved?.let { "已保存到下载目录：LanShare/$it" } ?: "收到文件 $name（点击打开应用查看）")
+            }
             "locked" -> notifyMsg("🔒 加密消息", "本机口令不匹配，无法解密")
             else -> {
                 val from = if (msg.senderName.isNotBlank()) "${msg.senderName}：" else ""

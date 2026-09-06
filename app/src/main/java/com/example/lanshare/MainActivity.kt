@@ -3,11 +3,17 @@ package com.example.lanshare
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.text.InputType
+import android.util.Base64
+import android.view.Gravity
+import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -40,35 +46,61 @@ class MainActivity : AppCompatActivity() {
     /** 各频道的消息缓存，切换频道时保留 */
     private val cache = HashMap<String, MutableList<Message>>()
 
-    private val pickImage =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            uri?.let { sendImage(it) }
+    // ==================== 批量发送队列（多选 / 有序 / 原图可选）====================
+    /** 队列项：统一描述待发的图片或文件 */
+    data class QueueItem(
+        val uri: Uri,
+        val name: String,
+        val size: Long,
+        val isImage: Boolean
+    )
+
+    private val queue = ArrayList<QueueItem>()
+
+    @Volatile
+    private var sending = false
+
+    /** 单条软上限：中继默认 32MB，base64 会膨胀约 33%，故源文件控制在 20MB 内较稳妥 */
+    private val softLimit = 20L * 1024 * 1024
+
+    /** 多选图片 */
+    private val pickImages =
+        registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+            uris?.forEach { enqueue(it, true) }
+            renderQueue()
+        }
+
+    /** 多选文件（任意格式） */
+    private val pickFiles =
+        registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+            uris?.forEach { enqueue(it, false) }
+            renderQueue()
         }
 
     // 收到他人消息
     private val msgListener: MsgListener = { msg ->
-        appendMessage(Message(
-            content = msg.content,
-            isImage = (msg.type == "image"),
-            isMe = msg.me,
-            time = nowTime(),
-            senderName = msg.senderName,
-            encrypted = msg.encrypted,
-            locked = (msg.type == "locked")
-        ))
+        appendMessage(toMessage(msg, msg.me))
     }
 
     // 自己发出的消息（本地回显）
     private val sentListener: MsgListener = { msg ->
-        appendMessage(Message(
-            content = msg.content,
-            isImage = (msg.type == "image"),
-            isMe = true,
-            time = nowTime(),
-            senderName = msg.senderName,
-            encrypted = msg.encrypted
-        ))
+        appendMessage(toMessage(msg, true))
     }
+
+    /** 统一把网络层消息转为界面消息模型（含文件字段） */
+    private fun toMessage(msg: Incoming, me: Boolean) = Message(
+        content = msg.content,
+        isImage = (msg.type == "image"),
+        isFile = (msg.type == "file"),
+        isMe = me,
+        time = nowTime(),
+        senderName = msg.senderName,
+        encrypted = msg.encrypted,
+        locked = (msg.type == "locked"),
+        fileName = msg.fileName,
+        mime = msg.mime,
+        size = msg.size
+    )
 
     private val stateListener: (Boolean, String) -> Unit = { connected, text ->
         b.tvStatus.text = text
@@ -90,11 +122,15 @@ class MainActivity : AppCompatActivity() {
                 target.add(Message(
                     content = msg.content,
                     isImage = (msg.type == "image"),
+                    isFile = (msg.type == "file"),
                     isMe = msg.me,
                     time = nowTime(),
                     senderName = msg.senderName,
                     encrypted = msg.encrypted,
-                    locked = (msg.type == "locked")
+                    locked = (msg.type == "locked"),
+                    fileName = msg.fileName,
+                    mime = msg.mime,
+                    size = msg.size
                 ))
             }
             if (ch == currentChannel) {
@@ -139,8 +175,23 @@ class MainActivity : AppCompatActivity() {
                 val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
                 cm.setPrimaryClip(android.content.ClipData.newPlainText("msg", msg.content))
                 toast("已复制")
+            },
+            onFileClick = { msg ->                        // 点/长按文件 -> 保存到下载目录
+                saveFileMessage(msg)
             }
         )
+
+    /** 保存收到的文件到公共下载目录（LanShare 子目录），并提示路径 */
+    private fun saveFileMessage(msg: Message) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val saved = FileSaver.saveDataUrl(
+                this@MainActivity, msg.content, msg.fileName, msg.mime
+            )
+            withContext(Dispatchers.Main) {
+                toast(if (saved != null) "已保存到下载目录：LanShare/$saved" else "保存失败")
+            }
+        }
+    }
 
     private fun doSave(msg: Message) {
         lifecycleScope.launch(Dispatchers.IO) {
@@ -198,7 +249,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupClick() {
         b.btnSend.setOnClickListener { sendText() }
-        b.btnImage.setOnClickListener { pickImage.launch("image/*") }
+        b.btnImage.setOnClickListener { pickImages.launch("image/*") }
+        b.btnFile.setOnClickListener { pickFiles.launch("*/*") }
+        b.btnQueueSend.setOnClickListener { sendQueue() }
+        b.btnQueueClear.setOnClickListener { queue.clear(); renderQueue() }
         b.btnConfig.setOnClickListener { showConfigDialog() }
         b.btnChannels.setOnClickListener { showChannelDialog() }
         b.tvChannel.setOnClickListener { showChannelDialog() }
@@ -255,13 +309,177 @@ class MainActivity : AppCompatActivity() {
         b.etInput.setText("")
     }
 
-    private fun sendImage(uri: Uri) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val dataUrl = ImageUtils.uriToDataUrl(this@MainActivity, uri)
-            withContext(Dispatchers.Main) {
-                if (dataUrl == null) { toast("图片处理失败"); return@withContext }
-                if (!ws.sendImage(dataUrl)) toast("未连接，将自动重试")
+    /** 加入队列（带大小校验与文件名解析） */
+    private fun enqueue(uri: Uri, isImage: Boolean) {
+        val name = queryName(uri)
+        val size = querySize(uri)
+        if (size > softLimit) {
+            toast("「$name」超过 ${softLimit / 1024 / 1024}MB，已跳过")
+            return
+        }
+        queue.add(QueueItem(uri, name, size, isImage))
+    }
+
+    /** 队列面板：显示序号、名称、大小，支持上移/下移/移除 */
+    private fun renderQueue() {
+        b.queueList.removeAllViews()
+        b.tvQueueCount.text = "待发 ${queue.size} 项"
+        b.queueBar.visibility =
+            if (queue.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+        if (queue.isEmpty()) return
+
+        val dp = resources.displayMetrics.density
+        queue.forEachIndexed { i, item ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, (4 * dp).toInt(), 0, (4 * dp).toInt())
             }
+
+            // 序号
+            row.addView(TextView(this).apply {
+                text = "${i + 1}"
+                setTextColor(0xFF1A1B26.toInt())
+                textSize = 11f
+                gravity = Gravity.CENTER
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_bubble_me)
+                setPadding((7 * dp).toInt(), (2 * dp).toInt(), (7 * dp).toInt(), (2 * dp).toInt())
+            })
+
+            // 名称 + 大小
+            val meta = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding((8 * dp).toInt(), 0, 0, 0)
+            }
+            meta.addView(TextView(this).apply {
+                text = (if (item.isImage) "🖼 " else "📎 ") + item.name
+                setTextColor(0xFFCDD6F4.toInt())
+                textSize = 12.5f
+                setSingleLine(true)
+                ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            })
+            meta.addView(TextView(this).apply {
+                text = fmtSize(item.size)
+                setTextColor(0xFF7982A9.toInt())
+                textSize = 10.5f
+            })
+            row.addView(meta, LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+            // 操作：上移 / 下移 / 移除
+            fun opBtn(t: String, enabled: Boolean, act: () -> Unit) = Button(this).apply {
+                text = t
+                isEnabled = enabled
+                textSize = 11f
+                minHeight = 0
+                minimumHeight = 0
+                setPadding((6 * dp).toInt(), 0, (6 * dp).toInt(), 0)
+                setOnClickListener { act() }
+            }
+            row.addView(opBtn("↑", i > 0) {
+                if (i > 0) { val t = queue[i - 1]; queue[i - 1] = queue[i]; queue[i] = t; renderQueue() }
+            })
+            row.addView(opBtn("↓", i < queue.size - 1) {
+                if (i < queue.size - 1) { val t = queue[i + 1]; queue[i + 1] = queue[i]; queue[i] = t; renderQueue() }
+            })
+            row.addView(opBtn("✕", true) { queue.removeAt(i); renderQueue() })
+
+            b.queueList.addView(row)
+        }
+    }
+
+    /** 按队列顺序依次发送（逐条间隔，避免触发中继速率限制） */
+    private fun sendQueue() {
+        if (sending || queue.isEmpty()) return
+        sending = true
+        val original = b.cbOriginal.isChecked
+        val items = ArrayList(queue)
+        val btn = b.btnQueueSend
+        btn.isEnabled = false
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            items.forEachIndexed { idx, item ->
+                withContext(Dispatchers.Main) { btn.text = "${idx + 1}/${items.size}" }
+
+                val dataUrl = if (item.isImage)
+                    ImageUtils.uriToDataUrl(this@MainActivity, item.uri, original = original)
+                else
+                    readFileAsDataUrl(item.uri)
+
+                withContext(Dispatchers.Main) {
+                    if (dataUrl == null) {
+                        toast("「${item.name}」读取失败")
+                    } else {
+                        val ok = if (item.isImage) {
+                            ws.sendImage(dataUrl)
+                        } else {
+                            ws.sendFile(item.name, guessMime(item.name), item.size, dataUrl)
+                        }
+                        if (!ok) toast("未连接，将自动重试")
+                    }
+                }
+                // 中继限速 100 条/60s，逐条留出余量
+                if (idx < items.size - 1) kotlinx.coroutines.delay(350)
+            }
+            withContext(Dispatchers.Main) {
+                queue.clear()
+                renderQueue()
+                btn.isEnabled = true
+                btn.text = "依次发送"
+                sending = false
+            }
+        }
+    }
+
+    /** 任意文件读取为 data URL（不做任何转码，保留原始字节） */
+    private fun readFileAsDataUrl(uri: Uri): String? {
+        return try {
+            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: return null
+            if (bytes.isEmpty()) return null
+            val mime = contentResolver.getType(uri) ?: "application/octet-stream"
+            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            "data:$mime;base64,$b64"
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun guessMime(name: String): String {
+        val ext = name.substringAfterLast('.', "")
+        if (ext.isBlank()) return "application/octet-stream"
+        return android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(ext.lowercase()) ?: "application/octet-stream"
+    }
+
+    private fun fmtSize(n: Long): String = when {
+        n < 1024 -> "$n B"
+        n < 1024 * 1024 -> String.format("%.1f KB", n / 1024.0)
+        n < 1024L * 1024 * 1024 -> String.format("%.1f MB", n / 1024.0 / 1024.0)
+        else -> String.format("%.2f GB", n / 1024.0 / 1024.0 / 1024.0)
+    }
+
+    /** 从 ContentResolver 读取文件名 */
+    private fun queryName(uri: Uri): String {
+        return try {
+            contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (i >= 0 && c.moveToFirst()) c.getString(i) else null
+            } ?: uri.lastPathSegment ?: "file"
+        } catch (e: Exception) {
+            uri.lastPathSegment ?: "file"
+        }
+    }
+
+    /** 从 ContentResolver 读取文件大小 */
+    private fun querySize(uri: Uri): Long {
+        return try {
+            contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val i = c.getColumnIndex(OpenableColumns.SIZE)
+                if (i >= 0 && c.moveToFirst()) c.getLong(i) else 0L
+            } ?: 0L
+        } catch (e: Exception) {
+            0L
         }
     }
 

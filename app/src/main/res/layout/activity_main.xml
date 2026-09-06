@@ -92,6 +92,82 @@
         android:clipToPadding="false"
         android:overScrollMode="never" />
 
+    <!-- ===== 待发队列：多选项按序号依次发送 ===== -->
+    <LinearLayout
+        android:id="@+id/queueBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:background="@color/surface"
+        android:elevation="6dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="6dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/tvQueueCount"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="待发 0 项"
+                android:textColor="@color/text"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <CheckBox
+                android:id="@+id/cbOriginal"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="原图"
+                android:textColor="@color/text_dim"
+                android:textSize="12sp"
+                android:buttonTint="@color/primary"
+                android:paddingStart="4dp" />
+
+            <Button
+                android:id="@+id/btnQueueSend"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginStart="8dp"
+                android:text="依次发送"
+                android:textSize="12sp"
+                android:textColor="@color/text_on_primary"
+                android:background="@drawable/bg_send"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:minHeight="0dp" />
+
+            <Button
+                android:id="@+id/btnQueueClear"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginStart="6dp"
+                android:text="清空"
+                android:textSize="12sp"
+                android:textColor="@color/text_dim"
+                android:background="@drawable/bg_icon_btn"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:minHeight="0dp" />
+        </LinearLayout>
+
+        <!-- 队列项由代码动态填充 -->
+        <LinearLayout
+            android:id="@+id/queueList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingTop="6dp" />
+    </LinearLayout>
+
     <!-- ===== 底部输入区 ===== -->
     <LinearLayout
         android:layout_width="match_parent"
@@ -112,7 +188,19 @@
             android:background="@drawable/bg_icon_btn"
             android:src="@android:drawable/ic_menu_gallery"
             android:tint="@color/primary"
-            android:contentDescription="发送图片"
+            android:contentDescription="选择图片（可多选）"
+            android:scaleType="centerInside"
+            android:padding="9dp" />
+
+        <ImageButton
+            android:id="@+id/btnFile"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_icon_btn"
+            android:src="@android:drawable/ic_menu_attachment"
+            android:tint="@color/primary"
+            android:contentDescription="发送文件（任意格式）"
             android:scaleType="centerInside"
             android:padding="9dp" />
 
