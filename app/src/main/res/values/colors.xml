@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 主色调：蓝 -->
+    <color name="primary">#7AA2F7</color>
+    <color name="primary_dark">#5A7FD7</color>
+    <color name="accent">#9ECE6A</color>
+    <color name="danger">#F7768E</color>
+    <color name="warn">#E0AF68</color>
+
+    <!-- 背景层级 -->
+    <color name="bg">#1A1B26</color>
+    <color name="surface">#24283B</color>
+    <color name="surface2">#2F3346</color>
+    <color name="surface3">#3B4058</color>
+
+    <!-- 文字 -->
+    <color name="text">#C0CAF5</color>
+    <color name="text_dim">#7982A9</color>
+    <color name="text_on_primary">#15161E</color>
+
+    <!-- 气泡 -->
+    <color name="bubble_me">#7AA2F7</color>
+    <color name="bubble_other">#2F3346</color>
+    <color name="bubble_me_text">#15161E</color>
+    <color name="bubble_other_text">#C0CAF5</color>
+    <color name="bubble_time">#15161E</color>
+
+    <!-- 分隔/描边 -->
+    <color name="divider">#2A2E42</color>
+</resources>
