@@ -93,6 +93,8 @@ class MessageAdapter(
     private val expanded = mutableSetOf<Long>()
 
     class VH(view: View) : RecyclerView.ViewHolder(view) {
+        val row: LinearLayout = view.findViewById(R.id.row)
+        val ivAvatar: TextView = view.findViewById(R.id.ivAvatar)
         val bubble: LinearLayout = view.findViewById(R.id.bubble)
         val ivImage: ImageView = view.findViewById(R.id.ivImage)
         val tvText: TextView = view.findViewById(R.id.tvText)
