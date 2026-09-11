@@ -559,6 +559,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL; setPadding(60, 20, 60, 0)
             addView(label("中继地址")); addView(etUrl)
             addView(label("聊天室（4~8 位数字）")); addView(etChan)
+            addView(label("本频道口令（加密传输，各端须一致，留空为明文）")); addView(etPwd)
             addView(label("设备名（同频道内区分发送者）")); addView(etDev)
             addView(label("本地记录保留天数（到期自动清理）")); addView(etKeep)
 
