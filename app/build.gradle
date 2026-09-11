@@ -11,8 +11,8 @@ android {
         applicationId "com.example.lanshare"
         minSdk 26        // API 26+ 才支持 PBKDF2WithHmacSHA256，须与浏览器端派生方式一致
         targetSdk 34
-        versionCode 37
-        versionName "5.7"
+        versionCode 38
+        versionName "5.8"
     }
 
     buildFeatures {

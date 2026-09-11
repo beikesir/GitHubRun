@@ -352,6 +352,11 @@ class MessageAdapter(
     // 不再需要在绑定阶段反查「组从哪里开始」。
 
     private fun bindBatch(holder: VH, group: List<Message>) {
+        val ctx = holder.itemView.context
+        // head 必须在引用之前声明：组容器与展开状态都依赖它
+        val head = group.first()
+        val me = head.isMe
+
         holder.ivImage.visibility = View.GONE
         holder.tvText.visibility = View.GONE
         holder.fileCard.visibility = View.GONE
@@ -359,18 +364,18 @@ class MessageAdapter(
         // 组容器取标准宽度（界面 9/20）；竖图更窄，会按自身比例排布
         holder.batchBox.layoutParams = LinearLayout.LayoutParams(
             stdWPx, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { gravity = if (head.isMe) Gravity.END else Gravity.START }
+        ).apply { gravity = if (me) Gravity.END else Gravity.START }
 
-        val ctx = holder.itemView.context
-        val head = group.first()
         val isExpanded = expanded.contains(head.id)
 
         holder.batchGrid.removeAllViews()
         val show = if (isExpanded) group else group.take(collapsedShow)
-        show.forEach { m -> holder.batchGrid.addView(buildImageCell(ctx, m, true)) }
+        show.forEach { m -> holder.batchGrid.addView(buildImageCell(ctx, m, true, me)) }
         // 折叠时第三张只露上半截
         if (!isExpanded && group.size > collapsedShow) {
-            holder.batchGrid.addView(buildImageCell(ctx, group[collapsedShow], false))
+            holder.batchGrid.addView(
+                buildImageCell(ctx, group[collapsedShow], false, me)
+            )
         }
 
         val rest = group.size - collapsedShow
