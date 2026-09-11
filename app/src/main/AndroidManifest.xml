@@ -5,6 +5,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 自动发现：组播锁 + 网络状态 + UDP 广播监听 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        android:minSdkVersion="33" />
 
     <application
         android:name=".LanShareApp"
@@ -26,12 +34,13 @@
             </intent-filter>
         </activity>
 
-        <!-- 接收系统分享的图片 -->
+        <!-- 接收系统分享的图片/文件：透明无界面，转交后台服务后立即退出 -->
         <activity
             android:name=".ShareActivity"
             android:exported="true"
             android:excludeFromRecents="true"
-            android:theme="@style/Theme.LanShare.Dialog">
+            android:noHistory="true"
+            android:theme="@style/Theme.LanShare.Transparent">
             <!-- 图片分享 -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

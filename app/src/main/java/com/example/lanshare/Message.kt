@@ -34,8 +34,21 @@ data class Message(
      * 应用内主动发送为空串，需长按手动下载。
      */
     val source: String = "",
+    /**
+     * 阶段1：正文外置到中继磁盘后的引用直链。
+     * fileUrl 非空表示正文不在 content 里——列表用 thumbUrl 快速渲染，
+     * 查看大图/下载用 fileUrl，避免解码庞大的 base64。
+     */
+    val fileId: String = "",
+    val fileUrl: String = "",
+    val thumbUrl: String = "",
     /** 时间戳（毫秒）：列表据此把「相邻 20 秒内、连续的图片」自动折成一组 */
-    val ts: Long = System.currentTimeMillis()
+    val ts: Long = System.currentTimeMillis(),
+    /**
+     * 本地留底：图片/文件正文在私有目录 media/ 下的文件名。
+     * 非空表示内容已存本机，重启后仍可显示，不再依赖中继。
+     */
+    val localPath: String = ""
 ) {
     /** 缓存解码后的图片（查看大图用），避免列表滚动时重复解码（不参与 equals） */
     var bitmap: android.graphics.Bitmap? = null
@@ -45,6 +58,14 @@ data class Message(
      * 与 bitmap 分开存放，避免缩略图把大图缓存挤成低清，导致点开全屏后模糊。
      */
     var thumbBitmap: android.graphics.Bitmap? = null
+
+    /**
+     * 图片原始宽高缓存：决定「横图以宽为准 / 竖图以高为准」的显示规则。
+     * 探测一次后复用，避免每次绑定都重新解码边界。
+     * 与 bitmap 一样放在类体内 —— 不参与构造与 equals，也不会被持久化。
+     */
+    var imgW: Int = 0
+    var imgH: Int = 0
 
     /** 依据扩展名给出直观图标 */
     fun icon(): String {

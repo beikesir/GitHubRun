@@ -34,6 +34,15 @@ import kotlin.math.abs
  */
 class MessageAdapter(
     private val messages: MutableList<Message>,
+    /**
+     * 界面宽度（像素）：所有显示尺寸都以它为基准换算，
+     * 与浏览器扩展端的 UI_W 是同一套比例，两端观感因此一致。
+     *   头像边长          界面 1/15
+     *   横图（宽 >= 高）  以宽为准，宽 = 界面 1/2
+     *   竖图（宽 <  高）  以高为准，高 = 界面 9/40
+     *   文件卡片          宽 = 界面 1/2，高 = 界面 1/10
+     */
+    private val uiWidthPx: Int,
     private val onImageClick: (Message) -> Unit,
     private val onImageLongClick: (Message) -> Unit,
     private val onTextLongClick: (Message) -> Unit,
@@ -42,6 +51,20 @@ class MessageAdapter(
     /** 点击文件：不落盘，仅提示可长按下载 */
     private val onFileTap: (Message) -> Unit = {}
 ) : RecyclerView.Adapter<MessageAdapter.VH>() {
+
+    // ==================== 显示尺寸（全部由界面宽度换算） ====================
+    /** 头像边长：界面 1/15（夹在 16~96px，避免超窄/超宽屏上失真） */
+    private val avatarPx = (uiWidthPx / 15f).toInt().coerceIn(16, 96)
+
+    /** 横图以宽为准：宽 = 界面 1/2 */
+    private val imageWPx = (uiWidthPx / 2f).toInt()
+
+    /** 竖图以高为准：高 = 界面 9/40 */
+    private val imageHPx = (uiWidthPx * 9f / 40f).toInt()
+
+    /** 文件卡片：宽 = 界面 1/2、高 = 界面 1/10 */
+    private val fileWPx = (uiWidthPx / 2f).toInt()
+    private val fileHPx = (uiWidthPx / 10f).toInt()
 
     /** 自动折叠的时间窗（毫秒） */
     private val groupWindow = 20_000L
@@ -96,38 +119,49 @@ class MessageAdapter(
         // 展示层已保证每个 item 都有内容，不再需要 GONE 隐藏
         holder.itemView.visibility = View.VISIBLE
 
-        val row = rows[position]
-        if (row is Row.Group) {
-            bindRowGroup(holder, row.items)
+        val item = rows[position]
+        if (item is Row.Group) {
+            bindRowGroup(holder, item.items)
             return
         }
-        val msg = (row as Row.Single).msg
+        val msg = (item as Row.Single).msg
+        val ctx = holder.itemView.context
 
-        // 气泡对齐与配色：自己发靠右、他人发靠左
+        // 整行贴边：自己靠右、他人靠左。
+        // 自己的行额外设为 RTL，让头像排到外侧（右），与扩展端一致；
+        // 内容列在 XML 里已强制 LTR，内部文字与对齐不受影响。
         val lp = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply { gravity = if (msg.isMe) Gravity.END else Gravity.START }
-        holder.bubble.layoutParams = lp
+        holder.row.layoutParams = lp
+        holder.row.layoutDirection =
+            if (msg.isMe) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR
 
-        val ctx = holder.itemView.context
+        // 头像：方形色块 + 设备名首字符（颜色由设备名派生，与扩展端同算法）
+        holder.ivAvatar.layoutParams = LinearLayout.LayoutParams(avatarPx, avatarPx)
+        val sender = senderOf(msg, ctx)
+        holder.ivAvatar.text =
+            sender.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+        holder.ivAvatar.background = avatarBg(ctx, sender)
+        holder.ivAvatar.visibility = View.VISIBLE
+
         val textColor = ContextCompat.getColor(
             ctx,
             if (msg.isMe) R.color.bubble_me_text else R.color.bubble_other_text
         )
 
-        // 走到这里必是单条消息（图片组已在 rows 层合并，由 bindRowGroup 处理）
-        holder.bubble.background = ContextCompat.getDrawable(
-                ctx,
-                if (msg.isMe) R.drawable.bg_bubble_me else R.drawable.bg_bubble_other
-            )
-            when {
+        // 内容列本身不再套气泡：
+        // 气泡背景只给文字，图片直接显示、文件卡自带背景。
+        holder.bubble.background = null
+        when {
                 msg.locked -> {
                     holder.tvText.visibility = View.VISIBLE
                     holder.ivImage.visibility = View.GONE
                     holder.fileCard.visibility = View.GONE
                     holder.batchBox.visibility = View.GONE
                     holder.tvText.text = "🔒 加密消息：本机口令不匹配，无法解密"
+                    holder.tvText.background = bubbleBg(ctx, msg.isMe)
                     clearListeners(holder)
                 }
                 msg.isImage -> {
@@ -135,9 +169,15 @@ class MessageAdapter(
                     holder.tvText.visibility = View.GONE
                     holder.fileCard.visibility = View.GONE
                     holder.batchBox.visibility = View.GONE
-                    val bmp = msg.bitmap ?: ImageUtils.decodeForDisplay(msg.content, 1280)
-                        .also { msg.bitmap = it }
-                    if (bmp != null) holder.ivImage.setImageBitmap(bmp)
+                    // 横图以宽为准（宽 = 界面 1/2）、竖图以高为准（高 = 界面 9/40），
+                    // 另一边由 adjustViewBounds 按原图比例自适应，不做裁切
+                    applyImageSize(holder.ivImage, msg, ctx)
+                    // 优先级：本地留底 > 中继直链 > 内联 base64
+                    if (!ImageLoader.load(holder.ivImage, msg)) {
+                        val bmp = msg.bitmap ?: ImageUtils.decodeForDisplay(msg.content, 1280)
+                            .also { msg.bitmap = it }
+                        if (bmp != null) holder.ivImage.setImageBitmap(bmp)
+                    }
 
                     holder.ivImage.setOnClickListener { onImageClick(msg) }
                     holder.ivImage.setOnLongClickListener { onImageLongClick(msg); true }
@@ -149,14 +189,19 @@ class MessageAdapter(
                     holder.ivImage.visibility = View.GONE
                     holder.tvText.visibility = View.GONE
                     holder.batchBox.visibility = View.GONE
+                    // 卡片尺寸固定：宽 = 界面 1/2、高 = 界面 1/10
+                    holder.fileCard.layoutParams =
+                        LinearLayout.LayoutParams(fileWPx, fileHPx)
 
                     holder.tvFileIcon.text = msg.icon()
                     holder.tvFileName.text = msg.fileName.ifBlank { "文件" }
+                    // 外置后正文在 fileUrl 直链上、content 为空，不能据此判为不可回补
+                    val hasBody = msg.content.isNotBlank() || msg.fileUrl.isNotBlank()
                     holder.tvFileSize.text =
-                        if (msg.omitted || msg.content.isBlank()) "文件（内容已不可回补）"
+                        if (msg.omitted || !hasBody) "文件（内容已不可回补）"
                         else msg.sizeText()
 
-                    if (msg.content.isBlank()) {
+                    if (!hasBody) {
                         holder.fileCard.alpha = 0.55f
                         holder.fileCard.setOnClickListener(null)
                         holder.fileCard.setOnLongClickListener(null)
@@ -176,6 +221,8 @@ class MessageAdapter(
                     holder.fileCard.visibility = View.GONE
                     holder.batchBox.visibility = View.GONE
                     holder.tvText.text = msg.content
+                    // 文字才带气泡：背景给 TextView 本身，只包住文字
+                    holder.tvText.background = bubbleBg(ctx, msg.isMe)
 
                     holder.tvText.setOnLongClickListener { onTextLongClick(msg); true }
                     holder.ivImage.setOnClickListener(null)
@@ -185,26 +232,23 @@ class MessageAdapter(
             }
 
         holder.tvText.setTextColor(textColor)
-        holder.tvTime.setTextColor(textColor)
-        holder.tvTime.alpha = 0.55f
+        // 时间在内容列上（深色背景），不能沿用气泡内的文字色
+        holder.tvTime.setTextColor(ContextCompat.getColor(ctx, R.color.text_dim))
+        holder.tvTime.alpha = 0.75f
         holder.tvFileName.setTextColor(textColor)
         holder.tvFileSize.setTextColor(textColor)
         holder.tvFileSize.alpha = 0.7f
         holder.tvSender.setTextColor(
             ContextCompat.getColor(
                 ctx,
-                if (msg.isMe) R.color.bubble_me_text else R.color.primary
+                // 深色背景上必须用亮色：他人蓝、自己绿，一眼可辨
+                if (msg.isMe) R.color.accent else R.color.primary
             )
         )
 
-        // 发送者与加密标记（自己发的消息不显示，避免冗余）
-        if (!msg.isMe && (msg.senderName.isNotBlank() || msg.encrypted)) {
-            holder.tvSender.visibility = View.VISIBLE
-            holder.tvSender.text =
-                msg.senderName.ifBlank { "未知设备" } + (if (msg.encrypted) " 🔒" else "")
-        } else {
-            holder.tvSender.visibility = View.GONE
-        }
+        // 发送者一律显示（含自己）：多端互发时便于区分来源
+        holder.tvSender.visibility = View.VISIBLE
+        holder.tvSender.text = sender + (if (msg.encrypted) " 🔒" else "")
 
         holder.tvTime.text = msg.time
     }
@@ -253,9 +297,38 @@ class MessageAdapter(
         rows = out
     }
 
-    /** 图片组：整组不带气泡边框，图片一张张往下排 */
+    /** 图片组：整组不带气泡，图片一张张往下排（头像与对齐与单条消息一致） */
     private fun bindRowGroup(holder: VH, group: List<Message>) {
+        val head = group.first()
+        val ctx = holder.itemView.context
+
+        val lp = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = if (head.isMe) Gravity.END else Gravity.START }
+        holder.row.layoutParams = lp
+        holder.row.layoutDirection =
+            if (head.isMe) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR
+
+        holder.ivAvatar.layoutParams = LinearLayout.LayoutParams(avatarPx, avatarPx)
+        val sender = senderOf(head, ctx)
+        holder.ivAvatar.text =
+            sender.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
+        holder.ivAvatar.background = avatarBg(ctx, sender)
+        holder.ivAvatar.visibility = View.VISIBLE
+
         holder.bubble.background = null
+        holder.tvSender.visibility = View.VISIBLE
+        holder.tvSender.text = sender + (if (head.encrypted) " 🔒" else "")
+        holder.tvSender.setTextColor(
+            ContextCompat.getColor(
+                ctx,
+                if (head.isMe) R.color.accent else R.color.primary
+            )
+        )
+        holder.tvTime.setTextColor(ContextCompat.getColor(ctx, R.color.text_dim))
+        holder.tvTime.alpha = 0.75f
+
         bindBatch(holder, group)
     }
 
@@ -277,6 +350,10 @@ class MessageAdapter(
         holder.tvText.visibility = View.GONE
         holder.fileCard.visibility = View.GONE
         holder.batchBox.visibility = View.VISIBLE
+        // 组容器取横图宽度（界面 1/2）；竖图更窄，会按自身比例排布
+        holder.batchBox.layoutParams = LinearLayout.LayoutParams(
+            imageWPx, LinearLayout.LayoutParams.WRAP_CONTENT
+        )
 
         val ctx = holder.itemView.context
         val head = group.first()
@@ -305,24 +382,87 @@ class MessageAdapter(
         }
     }
 
-    /** 组内一张图：定高铺满宽度；full=false 时只画上半截 */
+    /**
+     * 组内一张图。
+     *
+     * full=true  -> 完整显示：与单张图片同一套横竖规则
+     *              （横图以宽为准、竖图以高为准），按原图比例自适应、不裁切。
+     *              此前是「定高 + CENTER_CROP」，任何比例都会被切成一条，
+     *              这正是「组里每张只显示一部分」的原因。
+     * full=false -> 折叠态的第三张：仍按完整比例渲染，但外层容器只取其上半，
+     *              用来暗示「下面还有」，而不是把图片压扁。
+     */
     private fun buildImageCell(ctx: Context, m: Message, full: Boolean): View {
-        val h = dp(ctx, if (full) 140 else 68)
-        val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, h)
-        lp.bottomMargin = dp(ctx, 4)
-        return ImageView(ctx).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
+        return if (full) {
+            ImageView(ctx).apply {
+                // 与单张图片同一套横竖规则：竖图以高为准、横图以宽为准
+                val portrait = isPortrait(m, ctx)
+                layoutParams = LinearLayout.LayoutParams(
+                    if (portrait) LinearLayout.LayoutParams.WRAP_CONTENT else imageWPx,
+                    if (portrait) imageHPx else LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(ctx, 3) }
+                adjustViewBounds = true
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                clipToOutline = true
+                outlineProvider = ViewOutlineProvider.BACKGROUND
+                background = roundedBg(ctx, "#313244")
+                // 缩略图用小尺寸缓存，与查看大图用的 bitmap 分开，互不降质
+                if (!ImageLoader.load(this, m)) {
+                    val bmp = m.thumbBitmap
+                        ?: ImageUtils.decodeForDisplay(m.content, 480).also { m.thumbBitmap = it }
+                    setImageBitmap(bmp)
+                }
+                setOnClickListener { onImageClick(m) }
+                setOnLongClickListener { onImageLongClick(m); true }
+            }
+        } else buildHalfCell(ctx, m)
+    }
+
+    /**
+     * 折叠态第三张：只露上半截。
+     *
+     * 实现要点：容器高度固定为「半张」（宽的一半），
+     * 图片仍按原比例完整渲染（adjustViewBounds + WRAP_CONTENT）并顶部对齐，
+     * 超出容器的下半部分由 clipChildren 裁掉。
+     *
+     * 因此**不需要**预先知道图片真实宽高，也就不再依赖 Glide 的加载完成回调
+     * （见 ImageLoader 的说明：RequestListener 的 Java 签名跨版本易失配）。
+     */
+    private fun buildHalfCell(ctx: Context, m: Message): View {
+        // 容器高度取「该图完整显示高度」的一半：
+        // 竖图直接用 imageHPx；横图按「宽 -> 高」换算，故必须知道原图比例。
+        val sz = probeSize(m, ctx)
+        val fullH = if (sz != null && sz.first >= sz.second)
+            (imageWPx * sz.second.toFloat() / sz.first).toInt()
+        else imageHPx
+        val container = FrameLayout(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                imageWPx, (fullH / 2).coerceAtLeast(dp(ctx, 20))
+            ).apply { bottomMargin = dp(ctx, 3) }
+            clipChildren = true
+        }
+        val iv = ImageView(ctx).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            )
+            adjustViewBounds = true
+            scaleType = ImageView.ScaleType.FIT_CENTER
             clipToOutline = true
             outlineProvider = ViewOutlineProvider.BACKGROUND
             background = roundedBg(ctx, "#313244")
-            // 缩略图用小尺寸缓存，与查看大图用的 bitmap 分开，互不降质
-            val bmp = m.thumbBitmap ?: ImageUtils.decodeForDisplay(m.content, 480)
-                .also { m.thumbBitmap = it }
-            setImageBitmap(bmp)
-            setOnClickListener { onImageClick(m) }
-            setOnLongClickListener { onImageLongClick(m); true }
-            layoutParams = lp
         }
+        container.addView(iv)
+
+        if (!ImageLoader.load(iv, m)) {
+            val bmp = m.thumbBitmap
+                ?: ImageUtils.decodeForDisplay(m.content, 480).also { m.thumbBitmap = it }
+            iv.setImageBitmap(bmp)
+        }
+        iv.setOnClickListener { onImageClick(m) }
+        iv.setOnLongClickListener { onImageLongClick(m); true }
+        return container
     }
 
     private fun roundedBg(ctx: Context, colorHex: String): GradientDrawable =
@@ -338,6 +478,87 @@ class MessageAdapter(
         holder.ivImage.setOnLongClickListener(null)
         holder.fileCard.setOnClickListener(null)
         holder.fileCard.setOnLongClickListener(null)
+    }
+
+    // ==================== 头像、气泡与图片尺寸 ====================
+
+    /** 发送者显示名：自己发的消息回退到本机设备名 */
+    private fun senderOf(m: Message, ctx: Context): String {
+        if (m.senderName.isNotBlank()) return m.senderName
+        return if (m.isMe) DeviceIdentity.name(ctx).ifBlank { DeviceIdentity.defaultName() }
+        else "未知设备"
+    }
+
+    /**
+     * 字符串哈希（djb2）：与扩展端 popup.js 的 hashStr 同一算法，
+     * 保证同一设备名在两端得到同一个头像底色。
+     */
+    private fun hashStr(s: String): Int {
+        var h = 5381
+        for (c in s) h = ((h shl 5) + h + c.code) and 0x7FFFFFFF
+        return h
+    }
+
+    /**
+     * 头像底色：由设备名稳定派生。
+     * 扩展端用 HSL(h, 52%, 46%)，这里换成等价的 HSV(h, 68%, 70%)，视觉一致。
+     */
+    private fun avatarBg(ctx: Context, seed: String): GradientDrawable {
+        val hue = (hashStr(seed) % 360).toFloat()
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(ctx, 4).toFloat()
+            setColor(Color.HSVToColor(floatArrayOf(hue, 0.68f, 0.70f)))
+        }
+    }
+
+    /** 文字气泡背景：自己蓝、他人灰（只给 TextView，不套整列） */
+    private fun bubbleBg(ctx: Context, isMe: Boolean) =
+        ContextCompat.getDrawable(
+            ctx,
+            if (isMe) R.drawable.bg_bubble_me else R.drawable.bg_bubble_other
+        )
+
+    /**
+     * 探测图片原始宽高，结果缓存在 Message 上（一张图只探测一次）。
+     * 优先用已解码的 bitmap / 本机留底文件（最快），最后才解 base64。
+     * 探测不到（例如只有中继直链）时返回 null，调用方按横图处理。
+     */
+    private fun probeSize(m: Message, ctx: Context): Pair<Int, Int>? {
+        if (m.imgW > 0 && m.imgH > 0) return m.imgW to m.imgH
+        val sz = when {
+            m.bitmap != null -> m.bitmap!!.width to m.bitmap!!.height
+            m.thumbBitmap != null -> m.thumbBitmap!!.width to m.thumbBitmap!!.height
+            m.localPath.isNotBlank() ->
+                LocalStore.mediaFile(ctx, m.localPath)?.let { ImageUtils.probeSize(it) }
+            m.content.isNotBlank() -> ImageUtils.probeSize(m.content)
+            else -> null
+        }
+        if (sz != null && sz.first > 0 && sz.second > 0) {
+            m.imgW = sz.first
+            m.imgH = sz.second
+        }
+        return sz
+    }
+
+    /** 竖图（高 > 宽）以高为准；探测不到时按横图处理 */
+    private fun isPortrait(m: Message, ctx: Context): Boolean {
+        val sz = probeSize(m, ctx) ?: return false
+        return sz.first < sz.second
+    }
+
+    /**
+     * 按横竖比例给图片定尺寸：
+     *   横图（宽 >= 高）以宽为准 -> 宽 = 界面 1/2，高度自适应；
+     *   竖图（宽 <  高）以高为准 -> 高 = 界面 9/40，宽度自适应。
+     * 配合 adjustViewBounds，两条边都按原图比例，不会拉伸也不会裁切。
+     */
+    private fun applyImageSize(iv: ImageView, m: Message, ctx: Context) {
+        val portrait = isPortrait(m, ctx)
+        iv.layoutParams = LinearLayout.LayoutParams(
+            if (portrait) LinearLayout.LayoutParams.WRAP_CONTENT else imageWPx,
+            if (portrait) imageHPx else LinearLayout.LayoutParams.WRAP_CONTENT
+        )
     }
 
     private fun dp(ctx: Context, v: Int): Int =

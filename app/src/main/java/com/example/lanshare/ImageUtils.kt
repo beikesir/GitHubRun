@@ -8,6 +8,7 @@ import android.media.ExifInterface
 import android.net.Uri
 import android.util.Log
 import java.io.ByteArrayInputStream
+import java.io.File
 
 object ImageUtils {
 
@@ -57,6 +58,82 @@ object ImageUtils {
             Log.e(TAG, "图片解码失败", e)
             null
         }
+    }
+
+    /**
+     * 从 HTTP 直链下载并解码（外置消息 content 为空时使用）。
+     *
+     * 引用式消息落盘后只留 fileId，退后台重进 / 重启后 content 为空，
+     * 此时必须从 fileUrl 直链取回原图，否则全屏查看会误报「图片解码失败」。
+     */
+    fun decodeFromUrl(url: String, maxEdge: Int = 2048): Bitmap? {
+        return try {
+            val conn = java.net.URL(url).openConnection().apply {
+                connectTimeout = 15_000
+                readTimeout = 30_000
+            }
+            val bytes = conn.getInputStream().use { it.readBytes() }
+            if (bytes.isEmpty()) return null
+            val bmp = decodeSampled(bytes, maxEdge) ?: return null
+            val degrees = readRotation(bytes)
+            if (degrees == 0) bmp else rotateBitmap(bmp, degrees)
+        } catch (e: Exception) {
+            Log.e(TAG, "直链解码失败", e)
+            null
+        }
+    }
+
+    /**
+     * 解码本机留底的图片（media/ 下的副本）。
+     *
+     * 客户端已改为只依赖自身存储，查看大图应优先读本机副本——
+     * 中继重启后直链会失效，而本地文件依然在，不会误报「图片解码失败」。
+     */
+    fun decodeFromFile(file: File, maxEdge: Int = 2048): Bitmap? {
+        return try {
+            val bytes = file.readBytes()
+            if (bytes.isEmpty()) return null
+            val bmp = decodeSampled(bytes, maxEdge) ?: return null
+            val degrees = readRotation(bytes)
+            if (degrees == 0) bmp else rotateBitmap(bmp, degrees)
+        } catch (e: Exception) {
+            Log.e(TAG, "本地图片解码失败", e)
+            null
+        }
+    }
+
+    /**
+     * 探测图片原始宽高（只解边界，不分配像素内存）。
+     *
+     * 列表排版要区分「横图以宽为准 / 竖图以高为准」，必须先知道原图是横是竖。
+     * inJustDecodeBounds 只读文件头信息，速度快、不占内存。
+     * 结果由调用方缓存，一张图只探测一次。
+     */
+    fun probeSize(dataUrl: String): Pair<Int, Int>? {
+        return try {
+            val base64 = dataUrl.substringAfter("base64,", "")
+            if (base64.isEmpty()) return null
+            boundsOf(android.util.Base64.decode(base64, android.util.Base64.DEFAULT))
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** 从本机留底文件探测宽高：直接读文件流，不必把整份内容读进内存 */
+    fun probeSize(file: File): Pair<Int, Int>? {
+        return try {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            java.io.FileInputStream(file).use { BitmapFactory.decodeStream(it, null, o) }
+            if (o.outWidth > 0 && o.outHeight > 0) o.outWidth to o.outHeight else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun boundsOf(bytes: ByteArray): Pair<Int, Int>? {
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeStream(ByteArrayInputStream(bytes), null, o)
+        return if (o.outWidth > 0 && o.outHeight > 0) o.outWidth to o.outHeight else null
     }
 
     /** 按目标边长采样解码，避免超大原图在列表里直接撑爆内存 */

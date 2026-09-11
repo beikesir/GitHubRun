@@ -15,6 +15,8 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 /**
  * 图片保存到相册（Pictures/LanShare）
@@ -50,6 +52,26 @@ object GallerySaver {
             name
         } catch (e: Exception) {
             Log.e(TAG, "保存失败: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 阶段1：从 HTTP 直链下载并保存。
+     * 引用式消息正文不在 content 里（content 为空），必须走直链取原始字节，
+     * 否则自动存相册会因「空内容」静默失败——这正是分享图片不落盘的原因。
+     */
+    fun saveFromUrl(ctx: Context, url: String): String? {
+        return try {
+            val bytes = OkHttpClient().newCall(Request.Builder().url(url).build())
+                .execute().use { resp -> if (!resp.isSuccessful) null else resp.body?.bytes() }
+                ?: return null
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.getDefault()).format(Date())
+            val name = "lan_$stamp.jpg"
+            write(ctx, name, bytes)
+            name
+        } catch (e: Exception) {
+            Log.e(TAG, "直链保存失败: ${e.message}")
             null
         }
     }

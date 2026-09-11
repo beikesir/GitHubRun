@@ -7,6 +7,7 @@ object PrefsManager {
     private const val KEY_URL = "ws_url"
     private const val KEY_CHANNEL = "default_channel"
     private const val KEY_PASSWORDS = "passwords"
+    private const val KEY_KEEP_DAYS = "keep_days"
     private const val DEF_URL = "ws://192.168.1.100:8080"
     private const val DEF_CHANNEL = "0000"
 
@@ -45,4 +46,14 @@ object PrefsManager {
         obj.put(channel, pwd)
         sp.edit().putString(KEY_PASSWORDS, obj.toString()).apply()
     }
+
+    // ===== 本地记录保留天数 =====
+    fun getKeepDays(ctx: Context): Int =
+        ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+            .getInt(KEY_KEEP_DAYS, LocalStore.DEFAULT_KEEP_DAYS)
+            .let { if (it < 1) LocalStore.DEFAULT_KEEP_DAYS else it }
+
+    fun setKeepDays(ctx: Context, days: Int) =
+        ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_KEEP_DAYS, days.coerceIn(1, 365)).apply()
 }

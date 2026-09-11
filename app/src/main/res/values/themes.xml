@@ -16,4 +16,16 @@
         <item name="colorAccent">@color/accent</item>
         <item name="android:windowBackground">@color/surface</item>
     </style>
+
+    <!-- 分享入口专用：完全透明、无动画。
+         ShareActivity 只在收到系统分享时闪现一瞬，把任务交给后台服务后立即 finish，
+         不做任何界面渲染，因此用户看不到窗口。 -->
+    <style name="Theme.LanShare.Transparent" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
 </resources>

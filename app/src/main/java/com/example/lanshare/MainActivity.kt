@@ -1,6 +1,7 @@
 package com.example.lanshare
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -10,6 +11,7 @@ import android.os.Bundle
 import android.provider.OpenableColumns
 import android.text.InputType
 import android.util.Base64
+import android.util.Log
 import android.view.Gravity
 import android.widget.Button
 import android.widget.EditText
@@ -30,6 +32,7 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * 聊天主界面
@@ -93,6 +96,9 @@ class MainActivity : AppCompatActivity() {
         mime = msg.mime,
         size = msg.size,
         source = msg.source,
+        fileId = msg.fileId,
+        fileUrl = msg.fileUrl,
+        thumbUrl = msg.thumbUrl,
         ts = msg.ts
     )
 
@@ -104,38 +110,6 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /**
-     * 历史回补：整体替换该频道的列表
-     * （中继在加入频道时补发最近消息；此处必须替换而非追加，否则与实时消息叠加会重复）
-     */
-    private val historyListener: (String, List<Incoming>) -> Unit = { ch, list ->
-        runOnUiThread {
-            val target = cache.getOrPut(ch) { mutableListOf() }
-            target.clear()
-            list.forEach { msg ->
-                target.add(Message(
-                    content = msg.content,
-                    isImage = (msg.type == "image"),
-                    isFile = (msg.type == "file"),
-                    isMe = msg.me,
-                    time = nowTime(),
-                    senderName = msg.senderName,
-                    encrypted = msg.encrypted,
-                    locked = (msg.type == "locked"),
-                    fileName = msg.fileName,
-                    mime = msg.mime,
-                    size = msg.size,
-                    source = msg.source,
-                    ts = msg.ts
-                ))
-            }
-            if (ch == currentChannel) {
-                adapter.refresh()
-                b.rvMessages.scrollToPosition(target.size - 1)
-            }
-        }
-    }
-
     /** 服务端错误：口令错误则弹窗重输 */
     private val errorListener: (String, String) -> Unit = { code, message ->
         runOnUiThread {
@@ -144,12 +118,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 界面宽度（像素）：所有显示尺寸的统一基准。
+     * 适配器按它换算头像（1/15）、图片（横图宽 1/2、竖图高 9/40）、
+     * 文件卡片（宽 1/2、高 1/10）—— 与扩展端 UI_W 的换算规则完全一致。
+     */
+    private fun uiWidthPx(): Int = resources.displayMetrics.widthPixels
+
     /** 构建适配器（绑定点击/长按行为） */
     private fun makeAdapter(): MessageAdapter =
         MessageAdapter(
             getList(currentChannel),
+            uiWidthPx(),
             onImageClick = { msg ->                       // 点图片 -> 全屏
-                openFullscreen(msg)
+                openViewer(msg)
             },
             onImageLongClick = { msg ->                   // 长按图片 -> 保存
                 AlertDialog.Builder(this)
@@ -157,7 +139,7 @@ class MainActivity : AppCompatActivity() {
                     .setItems(arrayOf("保存到相册", "全屏查看")) { _, which ->
                         when (which) {
                             0 -> doSave(msg)
-                            1 -> openFullscreen(msg)
+                            1 -> openViewer(msg)
                         }
                     }.show()
             },
@@ -178,24 +160,48 @@ class MainActivity : AppCompatActivity() {
         )
 
     /**
-     * 全屏查看图片。
-     * 优先用已缓存的大图；批次里的图片只缓存了缩略图，此处按原图重新解码，
-     * 因此点开后仍是清晰大图，而不是模糊的缩略图放大版。
+     * 全屏查看：把本频道的图片串成序列交给查看器，左右滑即可翻阅前后图片。
+     *
+     * 这里不再预先解码 Bitmap——查看器用 Glide 按需加载
+     * （本机留底 > 中继直链 > 内联 base64），
+     * 既省内存（同一时刻只驻留当前一张），
+     * 也避免了「先解码再判断」导致的提前报「解码失败」。
      */
-    private fun openFullscreen(msg: Message) {
-        val bmp = msg.bitmap ?: ImageUtils.decodeForDisplay(msg.content, 2048)
-            ?.also { msg.bitmap = it }
-        if (bmp == null) { toast("图片解码失败"); return }
-        ImageHolder.pending = bmp
+    private fun openViewer(msg: Message) {
+        val imgs = getList(currentChannel).filter { it.isImage && !it.locked }
+        if (imgs.isEmpty()) { toast("没有可查看的图片"); return }
+        ImageHolder.images = imgs
+        ImageHolder.index = imgs.indexOfFirst { it.id == msg.id }.coerceAtLeast(0)
         startActivity(Intent(this, ImageViewerActivity::class.java))
     }
 
     /** 保存收到的文件到公共下载目录（LanShare 子目录），并提示路径 */
+    /** 本机留底 -> data URL，便于复用现有保存逻辑；无副本返回 null */
+    private fun localDataUrl(msg: Message): String? {
+        val f = LocalStore.mediaFile(this, msg.localPath) ?: return null
+        val mime = when {
+            msg.mime.isNotBlank() -> msg.mime
+            msg.isImage -> "image/jpeg"
+            else -> "application/octet-stream"
+        }
+        return try {
+            "data:$mime;base64," + Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun saveFileMessage(msg: Message) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val saved = FileSaver.saveDataUrl(
-                this@MainActivity, msg.content, msg.fileName, msg.mime
-            )
+            val local = localDataUrl(msg)          // 优先用本机副本，离线也能保存
+            val saved = when {
+                local != null -> FileSaver.saveDataUrl(
+                    this@MainActivity, local, msg.fileName, msg.mime)
+                msg.fileUrl.isNotBlank() -> FileSaver.saveFromUrl(
+                    this@MainActivity, msg.fileUrl, msg.fileName, msg.mime)
+                else -> FileSaver.saveDataUrl(
+                    this@MainActivity, msg.content, msg.fileName, msg.mime)
+            }
             withContext(Dispatchers.Main) {
                 toast(if (saved != null) "已保存到下载目录：LanShare/$saved" else "保存失败")
             }
@@ -204,7 +210,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun doSave(msg: Message) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val name = GallerySaver.saveDataUrl(this@MainActivity, msg.content)
+            val local = localDataUrl(msg)
+            val name = when {
+                local != null -> GallerySaver.saveDataUrl(this@MainActivity, local)
+                msg.fileUrl.isNotBlank() ->
+                    GallerySaver.saveFromUrl(this@MainActivity, msg.fileUrl)
+                else -> GallerySaver.saveDataUrl(this@MainActivity, msg.content)
+            }
             withContext(Dispatchers.Main) {
                 toast(if (name != null) "已保存到相册：LanShare/$name" else "保存失败")
             }
@@ -241,12 +253,20 @@ class MainActivity : AppCompatActivity() {
         ws.addListener(msgListener)
         ws.addSentListener(sentListener)
         ws.addStateListener(stateListener)
-        ws.addHistoryListener(historyListener)
         ws.addErrorListener(errorListener)
 
         startRelayService()
         askNotificationPermission()
         bindChannel(currentChannel)
+
+        // 客户端只依赖自身存储：启动时按保留天数清理过期记录与媒体
+        lifecycleScope.launch(Dispatchers.IO) {
+            val gone = LocalStore.cleanup(this@MainActivity,
+                PrefsManager.getKeepDays(this@MainActivity))
+            if (gone.first + gone.second > 0) {
+                Log.d("MainActivity", "已清理过期记录 ${gone.first} 条、媒体 ${gone.second} 个")
+            }
+        }
     }
 
     private fun setupRecycler() {
@@ -269,7 +289,25 @@ class MainActivity : AppCompatActivity() {
         b.btnDiscover.setOnClickListener { discoverChannels() }
     }
 
-    private fun getList(ch: String) = cache.getOrPut(ch) { mutableListOf() }
+    /** 并发安全：界面线程与后台服务会同时读写同一频道的列表 */
+    private fun getList(ch: String) = cache.getOrPut(ch) { CopyOnWriteArrayList<Message>() }
+
+    /** 从本机记录恢复某频道的消息（IO 读盘 -> 主线程渲染） */
+    private fun loadLocal(ch: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val list = LocalStore.load(this@MainActivity, ch)
+            withContext(Dispatchers.Main) {
+                val cur = getList(ch)
+                cur.clear()
+                cur.addAll(list)
+                if (ch == currentChannel) {
+                    adapter.refresh()
+                    if (adapter.itemCount > 0)
+                        b.rvMessages.scrollToPosition(adapter.itemCount - 1)
+                }
+            }
+        }
+    }
 
     /** 绑定频道：已连接则切换，未连接则建立连接 */
     private fun bindChannel(ch: String) {
@@ -278,6 +316,7 @@ class MainActivity : AppCompatActivity() {
         adapter = makeAdapter()
         b.rvMessages.adapter = adapter
         adapter.refresh()
+        loadLocal(ch)              // 切换到该频道时，先从本机恢复记录
 
         val url = PrefsManager.getUrl(this)
         ws.setPassword(ch, PrefsManager.getPassword(this, ch))   // 带上口令
@@ -435,9 +474,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun appendMessage(msg: Message) {
         runOnUiThread {
-            val list = getList(currentChannel)
+            val ch = currentChannel
+            val list = getList(ch)
             list.add(msg)
             adapter.refresh()
+            // 落本机：图片/文件正文同步写入 media/，重启后不再依赖中继
+            lifecycleScope.launch(Dispatchers.IO) {
+                LocalStore.append(this@MainActivity, ch, msg)
+            }
             // 滚动目标必须是展示行的末尾：图片合并成组后，
             // rows 的数量少于原始消息数，用 list.size 会滚过头（滚到空白处）。
             b.rvMessages.smoothScrollToPosition(adapter.itemCount - 1)
@@ -485,9 +529,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showConfigDialog() {
+    private fun showConfigDialog(prefillUrl: String? = null) {
         val etUrl = EditText(this).apply {
-            setText(PrefsManager.getUrl(this@MainActivity)); setSingleLine()
+            setText(prefillUrl ?: PrefsManager.getUrl(this@MainActivity)); setSingleLine()
         }
         val etChan = EditText(this).apply {
             setText(currentChannel); inputType = InputType.TYPE_CLASS_NUMBER; setSingleLine()
@@ -495,11 +539,25 @@ class MainActivity : AppCompatActivity() {
         val etDev = EditText(this).apply {
             setText(DeviceIdentity.name(this@MainActivity)); setSingleLine()
         }
+        val etKeep = EditText(this).apply {
+            setText(PrefsManager.getKeepDays(this@MainActivity).toString())
+            inputType = InputType.TYPE_CLASS_NUMBER; setSingleLine()
+        }
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(60, 20, 60, 0)
             addView(label("中继地址")); addView(etUrl)
             addView(label("聊天室（4~8 位数字）")); addView(etChan)
             addView(label("设备名（同频道内区分发送者）")); addView(etDev)
+            addView(label("本地记录保留天数（到期自动清理）")); addView(etKeep)
+
+            addView(label(" "))
+            addView(Button(this@MainActivity).apply {
+                text = "🔍 发现局域网中继"
+                setOnClickListener {
+                    // 带上用户已填内容，发现后回填、不丢输入
+                    showDiscoveryDialog()
+                }
+            })
         }
         AlertDialog.Builder(this).setTitle("配置").setView(box)
             .setPositiveButton("保存并连接") { _, _ ->
@@ -513,6 +571,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 PrefsManager.setUrl(this, url)
                 PrefsManager.setChannel(this, ch)
+                PrefsManager.setKeepDays(this,
+                    etKeep.text.toString().trim().toIntOrNull()
+                        ?.coerceIn(1, 365) ?: LocalStore.DEFAULT_KEEP_DAYS)
 
                 // 设备名：留空则恢复默认机型名
                 val dev = etDev.text.toString().trim()
@@ -524,6 +585,66 @@ class MainActivity : AppCompatActivity() {
                 bindChannel(ch)
             }
             .setNegativeButton("取消", null).show()
+    }
+
+    // ==================== 自动发现中继 ====================
+    private var discovery: RelayDiscovery? = null
+
+    private fun showDiscoveryDialog() {
+        val waitDlg = AlertDialog.Builder(this)
+            .setTitle("发现中继")
+            .setMessage("正在搜索局域网内的中继…\n（约 5 秒）")
+            .setNegativeButton("取消") { d, _ -> d.dismiss() }
+            .setOnDismissListener { discovery?.stop(); discovery = null }
+            .create()
+        waitDlg.show()
+
+        val d = RelayDiscovery(this)
+        discovery = d
+        d.start(object : RelayDiscovery.Sink {
+            override fun onFound(ep: RelayEndpoint) {
+                runOnUiThread {
+                    waitDlg.setMessage("正在搜索…\n已发现 ${ep.name} (${ep.host}:${ep.port})")
+                }
+            }
+
+            override fun onFinished(list: List<RelayEndpoint>) {
+                runOnUiThread {
+                    discovery = null
+                    if (waitDlg.isShowing) waitDlg.dismiss()
+                    if (list.isEmpty()) {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("未发现中继")
+                            .setMessage(
+                                "请确认：\n" +
+                                "1. 电脑上中继已启动（v5.4 及以上）\n" +
+                                "2. 手机与电脑在同一局域网\n" +
+                                "3. 电脑防火墙未拦截 5353 / 41234 端口\n" +
+                                "4. 路由器未开启 AP 隔离"
+                            )
+                            .setPositiveButton("返回", null)
+                            .show()
+                    } else {
+                        val labels = list.map {
+                            "${it.name}\n${it.host}:${it.port} · ${it.source}" +
+                                (if (it.version.isNotBlank()) " · ${it.version}" else "")
+                        }.toTypedArray()
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("发现 ${list.size} 个中继")
+                            .setItems(labels) { _, which ->
+                                // 回填地址后重开配置框，便于继续调整频道再保存
+                                showConfigDialog(list[which].wsUrl)
+                            }
+                            .setNegativeButton("取消", null)
+                            .show()
+                    }
+                }
+            }
+
+            override fun onError(msg: String) {
+                runOnUiThread { toast(msg) }
+            }
+        })
     }
 
     private fun showChannelDialog() {
@@ -557,14 +678,17 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         ws.ensureConnected()
+        // 已经进来看了，清掉服务累积的消息通知（通知是合并的，只有一条）
+        getSystemService(NotificationManager::class.java).cancel(RelayService.NOTI_MSG)
     }
 
     override fun onDestroy() {
         ws.removeListener(msgListener)
         ws.removeSentListener(sentListener)
         ws.removeStateListener(stateListener)
-        ws.removeHistoryListener(historyListener)
         ws.removeErrorListener(errorListener)
+        discovery?.stop()
+        discovery = null
         super.onDestroy()
     }
 }

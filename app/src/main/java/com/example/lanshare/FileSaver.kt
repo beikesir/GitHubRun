@@ -14,6 +14,8 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 /**
  * 任意格式文件保存到公共下载目录（Download/LanShare）。
@@ -34,6 +36,25 @@ object FileSaver {
      * @param mime     MIME 类型，用于让系统识别文件类型
      * @return 实际保存的文件名；失败返回 null
      */
+    /**
+     * 阶段1：从 HTTP 直链下载并保存。
+     * 复用 saveDataUrl 的写盘逻辑：下载后转成 data URL 再落盘，
+     * 避免重复实现 MediaStore 适配，优先保证正确性与兼容性。
+     */
+    fun saveFromUrl(ctx: Context, url: String, fileName: String, mime: String): String? {
+        return try {
+            val bytes = OkHttpClient().newCall(Request.Builder().url(url).build())
+                .execute().use { resp -> if (!resp.isSuccessful) null else resp.body?.bytes() }
+                ?: return null
+            val dataUrl = "data:$mime;base64," +
+                android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            saveDataUrl(ctx, dataUrl, fileName, mime)
+        } catch (e: Exception) {
+            Log.e(TAG, "直链保存失败: ${e.message}")
+            null
+        }
+    }
+
     fun saveDataUrl(ctx: Context, dataUrl: String, fileName: String, mime: String): String? {
         return try {
             val b64 = dataUrl.substringAfter("base64,", "")

@@ -3,8 +3,12 @@ package com.example.lanshare
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -41,6 +45,14 @@ data class Incoming(
      * 接收端据此自动落盘；应用内主动发送为空串。
      */
     val source: String = "",
+    /**
+     * 阶段1：正文外置到中继磁盘后的文件引用。
+     * fileId 非空即为「引用式」消息：content 为空，
+     * 界面渲染与下载应改用 thumbUrl（缩略图）/ fileUrl（原图）。
+     */
+    val fileId: String = "",
+    val fileUrl: String = "",
+    val thumbUrl: String = "",
     /** 消息时间戳（毫秒），界面按「相邻不超过 20 秒」自动折叠连续图片 */
     val ts: Long = System.currentTimeMillis()
 )
@@ -77,7 +89,6 @@ class WebSocketManager {
     private val listeners = CopyOnWriteArrayList<MsgListener>()
     private val sentListeners = CopyOnWriteArrayList<MsgListener>()
     private val stateListeners = CopyOnWriteArrayList<(Boolean, String) -> Unit>()
-    private val historyListeners = CopyOnWriteArrayList<(String, List<Incoming>) -> Unit>()
     private val errorListeners = CopyOnWriteArrayList<(String, String) -> Unit>()
 
     private var ws: WebSocket? = null
@@ -149,14 +160,6 @@ class WebSocketManager {
     }
     fun removeSentListener(l: MsgListener) { sentListeners.remove(l) }
 
-    /**
-     * 历史监听：参数 (channel, List<Incoming>)。
-     * 中继在加入频道时补发最近消息；历史里的消息需要按 sender.id 判定是否自己发的。
-     */
-    fun addHistoryListener(l: (String, List<Incoming>) -> Unit) {
-        if (!historyListeners.contains(l)) historyListeners.add(l)
-    }
-    fun removeHistoryListener(l: (String, List<Incoming>) -> Unit) { historyListeners.remove(l) }
 
     /** 错误监听：参数 (code, message)，如 auth_failed / rate_limit / too_large */
     fun addErrorListener(l: (String, String) -> Unit) {
@@ -224,6 +227,7 @@ class WebSocketManager {
                     put("action", "join")
                     put("data", channel)
                     put("password", passwords[channel] ?: "")
+                    put("senderId", sender?.id ?: "")
                 }.toString())
                 ready = true
                 flushPending()
@@ -236,22 +240,6 @@ class WebSocketManager {
                     val json = JSONObject(text)
                     val act = json.optString("action")
                     if (act == "joined") return
-
-                    // 服务端补发的历史（含加密条目）
-                    if (act == "history") {
-                        val ch = json.optString("channel", channel)
-                        val arr = json.optJSONArray("messages") ?: return
-                        val list = ArrayList<Incoming>()
-                        for (i in 0 until arr.length()) {
-                            parseHistoryEntry(ch, arr.optJSONObject(i) ?: continue)?.let { list.add(it) }
-                        }
-                        if (list.isNotEmpty()) {
-                            mainHandler.post {
-                                historyListeners.forEach { runCatching { it(ch, list) } }
-                            }
-                        }
-                        return
-                    }
 
                     if (act == "error") {
                         val code = json.optString("code")
@@ -286,6 +274,9 @@ class WebSocketManager {
                     // 来源标记：明文频道直接取外层，加密频道解密后从内层覆盖
                     var source = json.optString("source", "")
 
+                    // 阶段1：引用式消息——明文频道 fileId 在外层，加密频道在解密后覆盖
+                    var fileId = json.optString("fileId", "")
+
                     // ---- 端到端解密 ----
                     if (type == "encrypted") {
                         val pwd = passwords[chan]
@@ -302,6 +293,7 @@ class WebSocketManager {
                             mime = inner.optString("mime", "")
                             fileSize = inner.optLong("size", 0L)
                             source = inner.optString("source", "")
+                            fileId = inner.optString("fileId", "")
                         } else {
                             // 未配置口令或口令不匹配：标记不可读，不猜测内容
                             type = "locked"
@@ -311,7 +303,8 @@ class WebSocketManager {
                         }
                     }
 
-                    if (content.isNotEmpty() || type == "locked") {
+                    // 引用式消息 content 为空但 fileId 有效，必须放行
+                    if (content.isNotEmpty() || fileId.isNotBlank() || type == "locked") {
                         val incoming = Incoming(
                             type = type,
                             content = content,
@@ -321,6 +314,9 @@ class WebSocketManager {
                             mime = mime,
                             size = fileSize,
                             source = source,
+                            fileId = fileId,
+                            fileUrl = fileUrlOf(fileId),
+                            thumbUrl = thumbUrlOf(fileId)
                         )
                         mainHandler.post {
                             listeners.forEach { runCatching { it(incoming) } }
@@ -362,64 +358,6 @@ class WebSocketManager {
     }
 
     /** 解析一条历史记录：解密、判定是否本机发出 */
-    private fun parseHistoryEntry(ch: String, e: JSONObject): Incoming? {
-        // 去重：历史与实时广播可能重叠（中继补发 + 后续推送）
-        if (markSeen(e.optString("id", ""))) return null
-
-        val senderObj = e.optJSONObject("sender")
-        val senderName = senderObj?.optString("name", "") ?: ""
-        val senderId = senderObj?.optString("id", "") ?: ""
-        val wasEncrypted = e.optString("type", "text") == "encrypted"
-
-        var type = e.optString("type", "text")
-        // 服务端历史条目文本字段为 content，实时广播为 text —— 两者都兼容，
-        // 否则历史文本消息会取到空串并被下方 isEmpty 判断丢弃（此前安卓端看不到历史文本）
-        val textField = e.optString("content", "").ifEmpty { e.optString("text", "") }
-        var content = if (type == "image" || type == "file")
-            e.optString("data", "") else textField
-        var fileName = if (type == "file") e.optString("fileName", "") else ""
-        var mime = if (type == "file") e.optString("mime", "") else ""
-        var fileSize = if (type == "file") e.optLong("size", 0L) else 0L
-        var source = e.optString("source", "")
-
-        if (type == "encrypted") {
-            val pwd = passwords[ch]
-            val nonce = e.optString("nonce", "")
-            val cipher = e.optString("data", "")
-            val plain = if (pwd.isNullOrEmpty() || nonce.isEmpty()) null
-                        else CryptoHelper.decrypt(ch, pwd, nonce, cipher)
-            if (plain != null) {
-                val inner = JSONObject(plain)
-                type = inner.optString("type", "text")
-                content = if (type == "image" || type == "file")
-                    inner.optString("data", "") else inner.optString("text", "")
-                fileName = inner.optString("fileName", "")
-                mime = inner.optString("mime", "")
-                fileSize = inner.optLong("size", 0L)
-                source = inner.optString("source", "")
-            } else {
-                type = "locked"
-                content = ""
-                fileName = ""; mime = ""; fileSize = 0L
-                source = ""
-            }
-        }
-        if (content.isEmpty() && type != "locked") return null
-
-        return Incoming(
-            type = type,
-            content = content,
-            senderName = senderName,
-            encrypted = wasEncrypted,
-            fileName = fileName,
-            mime = mime,
-            size = fileSize,
-            source = source,
-            // 历史里自己发的消息也要靠右侧显示
-            me = senderId.isNotEmpty() && senderId == sender?.id
-        )
-    }
-
     /** 指数退避重连（同一时刻只允许一个待执行任务，避免叠加成多条连接） */
     private fun scheduleReconnect() {
         if (userClosed) return
@@ -456,15 +394,18 @@ class WebSocketManager {
      * @param content 文本内容、图片 data URL 或文件 data URL
      * @param meta  文件元数据（type==file 时必填）
      */
-    private fun buildPayload(type: String, content: String, meta: FileMeta? = null, source: String = ""): String? {
+    private fun buildPayload(type: String, content: String, meta: FileMeta? = null, source: String = "", fileId: String = ""): String? {
         val json = JSONObject().apply { put("channel", channel) }
         val pwd = passwords[channel]
+        // 引用式：正文已落盘，内外层改为携带 fileId
+        val isRef = (type == "image" || type == "file") && fileId.isNotBlank()
 
         // 内层负载：image/file 走 data 字段，text 走 text 字段
         val inner = JSONObject().apply {
             put("type", type)
-            when (type) {
-                "image", "file" -> put("data", content)
+            when {
+                isRef -> put("fileId", fileId)
+                type == "image" || type == "file" -> put("data", content)
                 else -> put("text", content)
             }
             if (meta != null) {
@@ -483,10 +424,19 @@ class WebSocketManager {
             json.put("data", sealed.second)
         } else {
             json.put("type", type)
-            when (type) {
-                "image", "file" -> {
-                    json.put("data", content)
+            when {
+                isRef -> {
+                    json.put("fileId", fileId)
                     // 明文频道也要带文件元数据，否则接收端无法还原文件名
+                    if (meta != null) {
+                        json.put("fileName", meta.name)
+                        json.put("mime", meta.mime)
+                        json.put("size", meta.size)
+                    }
+                    if (source.isNotEmpty()) json.put("source", source)
+                }
+                type == "image" || type == "file" -> {
+                    json.put("data", content)
                     if (meta != null) {
                         json.put("fileName", meta.name)
                         json.put("mime", meta.mime)
@@ -507,6 +457,53 @@ class WebSocketManager {
         return json.toString()
     }
 
+    // ==================== 阶段1：引用式架构（正文外置）====================
+    /** 由 ws(s):// 推导 http(s):// 基址（文件上传/下载） */
+    private fun httpBase(): String =
+        url.trim()
+            .replace(Regex("^ws://", RegexOption.IGNORE_CASE), "http://")
+            .replace(Regex("^wss://", RegexOption.IGNORE_CASE), "https://")
+            .trimEnd('/')
+
+    private fun fileUrlOf(id: String) = if (id.isBlank()) "" else "${httpBase()}/f/$id"
+    private fun thumbUrlOf(id: String) = if (id.isBlank()) "" else "${httpBase()}/t/$id"
+
+    /**
+     * 异步上传正文到中继，回调返回 fileId（失败返回空串，调用方退回内联发送）。
+     * 必须异步：发送入口可能在主线程，同步等待会卡界面。
+     */
+    private fun uploadAsync(dataUrl: String, type: String, meta: FileMeta?, cb: (String) -> Unit) {
+        val base = httpBase()
+        if (base.isBlank()) { cb(""); return }
+        val i = dataUrl.indexOf(',')
+        val b64 = if (i >= 0) dataUrl.substring(i + 1) else dataUrl
+        val fileName = meta?.name ?: if (type == "image") "image.jpg" else "file"
+        val mime = meta?.mime ?: if (type == "image") "image/jpeg" else "application/octet-stream"
+        val body = JSONObject().apply {
+            put("data", b64)
+            put("fileName", fileName)
+            put("mime", mime)
+        }.toString()
+        val req = Request.Builder()
+            .url("$base/upload")
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: java.io.IOException) {
+                Log.w(TAG, "上传失败，退回内联发送: ${e.message}")
+                cb("")
+            }
+            override fun onResponse(call: Call, response: Response) {
+                var id = ""
+                try {
+                    id = JSONObject(response.body?.string().orEmpty()).optString("fileId", "")
+                } catch (e: Exception) { /* 解析失败按无引用处理 */ }
+                response.close()
+                cb(id)
+            }
+        })
+    }
+
     /**
      * 发送文本消息。
      * 未连接时不丢弃：由 sendRaw 排入 pending，待重连成功后自动补发。
@@ -525,10 +522,15 @@ class WebSocketManager {
      */
     fun sendImage(dataUrl: String, viaShare: Boolean = false): Boolean {
         val src = if (viaShare) "share" else ""
-        val msg = buildPayload("image", dataUrl, source = src) ?: return false
-        val ok = sendRaw(msg)
-        if (ok) dispatchSent("image", dataUrl, null, src)
-        return ok
+        // 本地立即回显（用原始 dataUrl，无需等上传往返）
+        dispatchSent("image", dataUrl, null, src)
+        // 阶段1：正文异步落盘，拿到 fileId 后发一条只带引用的轻量消息
+        uploadAsync(dataUrl, "image", null) { fileId ->
+            val msg = buildPayload("image", if (fileId.isNotBlank()) "" else dataUrl,
+                null, src, fileId) ?: return@uploadAsync
+            sendRaw(msg)
+        }
+        return true
     }
 
     /**
@@ -541,10 +543,13 @@ class WebSocketManager {
     fun sendFile(fileName: String, mime: String, size: Long, dataUrl: String, viaShare: Boolean = false): Boolean {
         val meta = FileMeta(fileName, mime, size)
         val src = if (viaShare) "share" else ""
-        val msg = buildPayload("file", dataUrl, meta, src) ?: return false
-        val ok = sendRaw(msg)
-        if (ok) dispatchSent("file", dataUrl, meta, src)
-        return ok
+        dispatchSent("file", dataUrl, meta, src)
+        uploadAsync(dataUrl, "file", meta) { fileId ->
+            val msg = buildPayload("file", if (fileId.isNotBlank()) "" else dataUrl,
+                meta, src, fileId) ?: return@uploadAsync
+            sendRaw(msg)
+        }
+        return true
     }
 
     /** 把“自己发出去”的消息告知界面，便于本地立刻渲染 */
@@ -604,6 +609,7 @@ class WebSocketManager {
             }.toString())
             ws?.send(JSONObject().apply {
                 put("action", "join"); put("data", ch); put("password", pwd)
+                put("senderId", sender?.id ?: "")
             }.toString())
         }
     }
@@ -615,6 +621,7 @@ class WebSocketManager {
             ws?.send(JSONObject().apply {
                 put("action", "join"); put("data", ch)
                 put("password", passwords[ch] ?: "")
+                put("senderId", sender?.id ?: "")
             }.toString())
         }
     }
